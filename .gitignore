@@ -1,0 +1,11 @@
+# Python and macOS
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Downloaded installers and generated patcher output
+*.exe
+*_ARM64_Experimental/
+*-FAILED-*/
+.*.building-*/
+*.log

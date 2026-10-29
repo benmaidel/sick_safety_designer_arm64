@@ -1,0 +1,55 @@
+{
+  "platform": "macOS Apple Silicon; bundled Homebrew arm64 Tahoe binaries",
+  "components": [
+    {
+      "file": "bin/innoextract",
+      "sha256": "c873d763093e4824a4f41b4ad2d5905218871e33c6a7c7edfc5bb8d1d9eafe8f",
+      "source": "work/tools/innoextract/1.9_14/bin/innoextract"
+    },
+    {
+      "file": "lib/libboost_container.dylib",
+      "sha256": "deb75a77c66693d18838ff7076d5a4b5ac36698b68037ef6c3b7b22d72ab4314",
+      "source": "work/tools/boost/1.92.0_1/lib/libboost_container.dylib"
+    },
+    {
+      "file": "lib/libboost_atomic.dylib",
+      "sha256": "5e2bca9ccc21c65f36a3f7319e7debf312967f46cfc2cbb5dd6e01b6ca137085",
+      "source": "work/tools/boost/1.92.0_1/lib/libboost_atomic.dylib"
+    },
+    {
+      "file": "lib/libboost_random.dylib",
+      "sha256": "d2a3e70bc7f64753acbfd3343e1a20a6bf2497198a44bc6106b6d4ebbd8b95d4",
+      "source": "work/tools/boost/1.92.0_1/lib/libboost_random.dylib"
+    },
+    {
+      "file": "lib/libboost_program_options.dylib",
+      "sha256": "135491866953086e30476515358bb7c6cbfae509d00cf5f7374ba351ed54c70a",
+      "source": "work/tools/boost/1.92.0_1/lib/libboost_program_options.dylib"
+    },
+    {
+      "file": "lib/libboost_date_time.dylib",
+      "sha256": "239721290fbc6895d779c6d6f4f3468a61f34ecbe82b707e147a59955da858f1",
+      "source": "work/tools/boost/1.92.0_1/lib/libboost_date_time.dylib"
+    },
+    {
+      "file": "lib/libboost_filesystem.dylib",
+      "sha256": "a7c35d2f9f1d3056c34c1e060548412ba21f69e46fa99a62e8d9efddc0005693",
+      "source": "work/tools/boost/1.92.0_1/lib/libboost_filesystem.dylib"
+    },
+    {
+      "file": "lib/libboost_iostreams.dylib",
+      "sha256": "b1bb3496a40d36fcc733755dcebf2cf1318956a420e98c67c940c1059c433488",
+      "source": "work/tools/boost/1.92.0_1/lib/libboost_iostreams.dylib"
+    },
+    {
+      "file": "lib/libzstd.1.dylib",
+      "sha256": "e2847c4613b386683c234913ae3b7b04299254096caf7616e3b3cd9bb97a39ab",
+      "source": "/opt/homebrew/opt/zstd/lib/libzstd.1.dylib"
+    },
+    {
+      "file": "lib/liblzma.5.dylib",
+      "sha256": "3d5bfa2f097c31463642b1daab5e662b44368bb4da368f85e412e7f9adcbaa10",
+      "source": "/opt/homebrew/opt/xz/lib/liblzma.5.dylib"
+    }
+  ]
+}
