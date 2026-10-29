@@ -11,12 +11,16 @@ import sys
 import tempfile
 import unittest
 import zlib
+import hashlib
+import contextlib
+import io
 from pathlib import Path
+from unittest.mock import patch as mock_patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from inno_arm64 import (MAGIC, VERSION, STRINGS, PatchError, dispatcher, inspect,
                         patch, read_block, script_functions, write_block)
-from patch_safety_designer import inspect_nested, resolve_input, safe_archive_paths
+from patch_safety_designer import inspect_nested, resolve_input, safe_archive_paths, main, debug_directory
 
 
 def string(data):
@@ -41,18 +45,30 @@ def script_fixture(path='{tmp}\\', components=('Setup_Core.exe', 'Setup_NewModul
     return prefix + b''.join(records) + body + init
 
 
-def installer_fixture(path, allowed=4, mode64=4, certificate=False):
+def installer_fixture(path, allowed=4, mode64=4, certificate=False, code=b'', payload_files=None):
     fields = {'app_name': 'Test Safety Designer', 'app_id': 'Safety Designer',
-              'publisher': 'SICK AG', 'code': b''}
+              'publisher': 'SICK AG', 'code': code}
     raw = b''.join(string(value if isinstance(value, bytes) else value.encode('utf-16le'))
                    for value in (fields.get(name, '') for name in STRINGS))
-    raw += bytes(149) + bytes((allowed, mode64)) + bytes(32)
+    fixed = bytearray(149)
+    struct.pack_into('<I', fixed, 32, len(payload_files or {}))
+    raw += fixed + bytes((allowed, mode64)) + bytes(32)
     prefix = bytearray(4096)
     prefix[:2] = b'MZ'; struct.pack_into('<I', prefix, 60, 128)
     prefix[128:132] = b'PE\0\0'; struct.pack_into('<H', prefix, 152, 0x10b)
     prefix[2048:] = (b'ORIGINAL_APPLICATION_PAYLOAD_' * 100)[:2048]
+    locations = bytearray()
+    if payload_files:
+        prefix = prefix[:2048]
+        for contents in payload_files.values():
+            offset = len(prefix) - 2048
+            record = bytearray(74)
+            struct.pack_into('<IIIQQQ', record, 0, 0, 0, offset, 0, len(contents), len(contents))
+            record[36:56] = hashlib.sha1(contents).digest()
+            locations.extend(record)
+            prefix.extend(b'zlb\x1a' + contents)
     header_offset = len(prefix)
-    tail = VERSION.ljust(64, b'\0') + write_block(raw) + write_block(bytes(8))
+    tail = VERSION.ljust(64, b'\0') + write_block(raw) + write_block(locations or bytes(8))
     engine_offset = len(prefix) + len(tail)
     engine = b'MZ' + bytes(62)
     tail += write_block(engine)
@@ -66,6 +82,45 @@ def installer_fixture(path, allowed=4, mode64=4, certificate=False):
     prefix[1024:1024 + len(table)] = table
     path.write_bytes(prefix + tail)
     return path
+
+
+class FixtureExtractor:
+    """A tiny stored-chunk decoder for exercising output/debug lifecycle only.
+
+    Real Inno unpacker round-trips are tested separately on the actual download.
+    Synthetic fixtures contain no vendor script bytecode or application data.
+    """
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    def listing(self, source, log):
+        Path(log).write_text('fixture listing\n')
+        return ['tmp/Setup_Core.exe'] if inspect(source)['counts'][8] else ['app/placeholder.txt']
+
+    def extract(self, source, target, log, includes=()):
+        Path(log).write_text('fixture extraction\n')
+        meta = inspect(source)
+        record = meta['locations']
+        offset = struct.unpack_from('<I', record, 8)[0]
+        size = struct.unpack_from('<Q', record, 20)[0]
+        flags = struct.unpack_from('<H', record, 72)[0]
+        if flags & (16 | 64 | 128):
+            raise ValueError('Fixture decoder only supports unfiltered stored chunks')
+        with Path(source).open('rb') as stream:
+            stream.seek(meta['payload'] + offset)
+            if stream.read(4) != b'zlb\x1a':
+                raise ValueError('Incorrect chunk offset or magic')
+            content = stream.read(size)
+        if hashlib.sha1(content).digest() != record[36:56]:
+            raise ValueError('Incorrect embedded checksum')
+        folder = Path(target) / 'tmp'; folder.mkdir(parents=True)
+        (folder / 'Setup_Core.exe').write_bytes(content)
+
+    def test(self, source, log):
+        Path(log).write_text('fixture integrity check\n')
+        if self.fail:
+            raise PatchError('Injected verifier failure')
+        inspect(source)
 
 
 class PatcherTests(unittest.TestCase):
@@ -171,6 +226,89 @@ class PatcherTests(unittest.TestCase):
         escaped = str(folder).replace(' ', '\\ ')
         self.assertEqual(resolve_input(escaped), exe.resolve())
         self.assertEqual(resolve_input("'" + str(folder) + "'"), exe.resolve())
+
+    def make_release(self):
+        component = installer_fixture(self.root / 'original-component.exe')
+        source = installer_fixture(self.root / 'SafetyDesigner_Test_Setup.exe',
+                                   code=script_fixture(components=('Setup_Core.exe',)),
+                                   payload_files={'Setup_Core.exe': component.read_bytes()})
+        return source
+
+    def invoke_tool(self, source, *options, fail=False):
+        with mock_patch('patch_safety_designer.Extractor', return_value=FixtureExtractor(fail)), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return main([str(source), *options])
+
+    def test_default_publishes_only_prefixed_single_exe(self):
+        source = self.make_release()
+        before = source.read_bytes()
+        existing = set(self.root.iterdir())
+        self.assertEqual(self.invoke_tool(source), 0)
+        output = source.with_name('patched_arm64_' + source.name)
+        self.assertEqual(set(self.root.iterdir()) - existing, {output})
+        self.assertTrue(output.is_file())
+        self.assertEqual(source.read_bytes(), before)
+        meta = inspect(output)
+        self.assertEqual((meta['allowed'], meta['mode64']), (20, 20))
+        pos, length = meta['fields']['code']
+        self.assertEqual(meta['raw'][pos:pos + length], script_fixture(components=('Setup_Core.exe',)))
+        self.assertFalse(debug_directory(output).exists())
+        # The actual embedded child, not an adjacent file, must be ARM64-patched.
+        decoded = self.root / 'decoded'
+        FixtureExtractor().extract(output, decoded, self.root / 'decode.log')
+        self.assertEqual(inspect(decoded / 'tmp/Setup_Core.exe')['allowed'], 20)
+
+    def test_debug_retains_reports_but_no_component_sidecars(self):
+        source = self.make_release()
+        existing = set(self.root.iterdir())
+        self.assertEqual(self.invoke_tool(source, '--debug'), 0)
+        output = source.with_name('patched_arm64_' + source.name)
+        debug = debug_directory(output)
+        self.assertEqual(set(self.root.iterdir()) - existing, {output, debug})
+        self.assertTrue((debug / 'patch-manifest.json').is_file())
+        self.assertTrue((debug / 'logs').is_dir())
+        self.assertFalse(list(debug.rglob('*.exe')))
+
+    def test_failed_build_cleans_everything_by_default(self):
+        source = self.make_release()
+        existing = set(self.root.iterdir())
+        self.assertEqual(self.invoke_tool(source, fail=True), 2)
+        self.assertEqual(set(self.root.iterdir()), existing)
+
+    def test_failed_debug_build_keeps_only_diagnostics(self):
+        source = self.make_release()
+        existing = set(self.root.iterdir())
+        self.assertEqual(self.invoke_tool(source, '--debug', fail=True), 2)
+        output = source.with_name('patched_arm64_' + source.name)
+        debug = debug_directory(output)
+        self.assertEqual(set(self.root.iterdir()) - existing, {debug})
+        self.assertEqual(json.loads((debug / 'status.json').read_text())['status'], 'failed')
+        self.assertFalse(list(debug.rglob('*.exe')))
+
+    def test_inspect_with_debug_remains_read_only(self):
+        source = self.make_release()
+        existing = set(self.root.iterdir())
+        self.assertEqual(self.invoke_tool(source, '--inspect', '--debug'), 0)
+        self.assertEqual(set(self.root.iterdir()), existing)
+
+    def test_existing_default_output_is_never_replaced(self):
+        source = self.make_release()
+        output = source.with_name('patched_arm64_' + source.name)
+        output.write_bytes(b'EXISTING INSTALLER')
+        existing = set(self.root.iterdir())
+        self.assertEqual(self.invoke_tool(source), 2)
+        self.assertEqual(output.read_bytes(), b'EXISTING INSTALLER')
+        self.assertEqual(set(self.root.iterdir()), existing)
+
+    def test_existing_debug_folder_is_never_replaced(self):
+        source = self.make_release()
+        output = source.with_name('patched_arm64_' + source.name)
+        debug = debug_directory(output)
+        debug.mkdir(); (debug / 'keep.txt').write_text('EXISTING DEBUG LOG')
+        existing = set(self.root.iterdir())
+        self.assertEqual(self.invoke_tool(source, '--debug'), 2)
+        self.assertEqual((debug / 'keep.txt').read_text(), 'EXISTING DEBUG LOG')
+        self.assertEqual(set(self.root.iterdir()), existing)
 
 
 if __name__ == '__main__':

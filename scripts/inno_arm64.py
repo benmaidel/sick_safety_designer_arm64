@@ -228,9 +228,22 @@ def inspect(path):
     with path.open('rb') as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
         require(data[:2] == b'MZ', 'Not a Windows executable')
         limit = min(len(data), 2 * 1024 * 1024)
-        table = data.find(MAGIC, 0, limit)
-        require(table >= 0 and data.find(MAGIC, table + 1, limit) < 0,
+        candidates, cursor = [], 0
+        while True:
+            candidate = data.find(MAGIC, cursor, limit)
+            if candidate < 0:
+                break
+            cursor = candidate + 1
+            if candidate + 44 <= len(data):
+                header = u32(data, candidate + 32)
+                payload = u32(data, candidate + 36)
+                if (candidate + 44 <= payload < header < len(data)
+                        and data[header:header + 21] == b'Inno Setup Setup Data'
+                        and zlib.crc32(data[candidate:candidate + 40]) == u32(data, candidate + 40)):
+                    candidates.append(candidate)
+        require(len(candidates) == 1,
                 'Unsupported installer: missing or ambiguous Inno loader directory')
+        table = candidates[0]
         require(table + 44 <= len(data) and zlib.crc32(data[table:table + 40]) == u32(data, table + 40),
                 'Inno loader-directory checksum mismatch')
         require(u32(data, table + 12) == 1, 'Unsupported Inno loader revision')
@@ -271,6 +284,7 @@ def inspect(path):
         return {'path': str(path), 'name': path.name, 'size': len(data), 'table': table,
                 'header': header, 'payload': payload, 'engine': engine, 'first_end': first_end,
                 'second_end': second_end, 'engine_end': engine_end, 'raw': raw, 'fields': fields,
+                'locations': locations, 'counts': struct.unpack_from('<16I', raw, pos),
                 'values': values, 'arch': arch, 'allowed': allowed, 'mode64': mode64,
                 'optional': optional, 'security': security, 'certificate': certificate,
                 'certificate_size': certificate_size, 'format': VERSION.decode()}
@@ -283,6 +297,121 @@ def copy_range(source, target, start, length):
         require(chunk, 'Installer changed or became truncated during copying')
         target.write(chunk)
         length -= len(chunk)
+
+
+def embedded_dispatcher(code):
+    """Keep the vendor's temporary-file dispatch, including for older patched inputs."""
+    dispatcher(code)  # Validate the known script contract before changing anything.
+    function = script_functions(code)['INSTALLSETUPCOMPONENT']
+    start, size = function['offset'], function['size']
+    body = code[start:start + size]
+    old = struct.pack('<I', 6) + '{tmp}\\'.encode('utf-16le')
+    external = struct.pack('<I', 6) + '{src}\\'.encode('utf-16le')
+    return code[:start] + body.replace(external, old) + code[start + size:]
+
+
+def sha1_file(path):
+    checksum = hashlib.sha1()
+    with Path(path).open('rb') as stream:
+        for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b''):
+            checksum.update(chunk)
+    return checksum.digest()
+
+
+def repack_main(source, target, original_files, replacements):
+    """Embed patched child EXEs using supported Inno stored chunks, not sidecars.
+
+    Only this observed 74-byte location-record layout is supported. Existing
+    application archives inside the child EXEs stay unchanged. Stored outer
+    chunks avoid changing or reimplementing Inno's compression/address filters.
+    """
+    source, target = Path(source), Path(target)
+    require(source.resolve() != target.resolve() and not target.exists(),
+            'Refusing to overwrite a source or existing output installer')
+    before = digest(source)
+    meta = inspect(source)
+    require(meta['values']['publisher'] == 'SICK AG' and meta['values']['app_id'] == 'Safety Designer',
+            'Only the supported SICK release-package container can be rebuilt')
+    require(meta['allowed'] == 0 or meta['allowed'] & 4, 'Main installer is not x64-capable')
+    count = meta['counts'][8]
+    locations = bytearray(meta['locations'])
+    require(count > 0 and len(locations) == count * 74,
+            'Unsupported embedded-file location-table layout')
+    originals = {}
+    for file in map(Path, original_files):
+        key = (file.stat().st_size, sha1_file(file))
+        require(key not in originals, 'Ambiguous embedded-file checksum mapping')
+        originals[key] = file
+    require(len(originals) == count, 'Embedded-file count does not match extracted payloads')
+    rows, used = [], set()
+    for index in range(count):
+        pos = index * 74
+        first, last = struct.unpack_from('<II', locations, pos)
+        flags = struct.unpack_from('<H', locations, pos + 72)[0]
+        require(first == last == 0 and not flags & 64 and not flags & ~0x7ff,
+                'Spanned, encrypted or unfamiliar embedded-file flags are unsupported')
+        key = (struct.unpack_from('<Q', locations, pos + 20)[0], bytes(locations[pos + 36:pos + 56]))
+        require(key in originals and key not in used, 'Cannot map an embedded file to its original payload')
+        used.add(key)
+        original = originals[key]
+        replacement = Path(replacements.get(original.name, original))
+        rows.append((pos, flags, original, replacement))
+    require(set(replacements) <= {file.name for file in originals.values()},
+            'A replacement is not present in the original container')
+    raw = bytearray(meta['raw'])
+    allowed = meta['allowed'] | 16 if meta['allowed'] else 0
+    mode64 = meta['mode64'] | 16 if meta['mode64'] & 4 else meta['mode64']
+    raw[meta['arch']:meta['arch'] + 2] = bytes((allowed, mode64))
+    code_pos, code_size = meta['fields']['code']
+    raw[code_pos:code_pos + code_size] = embedded_dispatcher(bytes(raw[code_pos:code_pos + code_size]))
+    embedded = []
+    with source.open('rb') as original_stream, target.open('xb+') as out:
+        copy_range(original_stream, out, 0, meta['payload'])
+        for pos, flags, original, replacement in rows:
+            offset = out.tell() - meta['payload']
+            size = replacement.stat().st_size
+            require(offset <= 0x7fffffff and out.tell() + size + 4 < 2 ** 32,
+                    'Rebuilt payload exceeds supported Inno loader offsets')
+            out.write(b'zlb\x1a')
+            with replacement.open('rb') as payload:
+                copy_range(payload, out, 0, size)
+            struct.pack_into('<IIIQQQ', locations, pos, 0, 0, offset, 0, size, size)
+            locations[pos + 36:pos + 56] = sha1_file(replacement)
+            # The extracted file is raw: no compression or CALL/JMP filter remains.
+            struct.pack_into('<H', locations, pos + 72, flags & ~(128 | 16))
+            embedded.append({'name': original.name, 'sha256': digest(replacement),
+                             'bytes': size, 'component_replaced': original.name in replacements})
+        header_offset = out.tell()
+        original_stream.seek(meta['header'])
+        out.write(original_stream.read(64))
+        out.write(write_block(raw)); out.write(write_block(locations))
+        engine_offset = out.tell()
+        copy_range(original_stream, out, meta['engine'], meta['engine_end'] - meta['engine'])
+        final_size = out.tell()
+        require(final_size < 2 ** 32, 'Rebuilt installer exceeds the supported 4 GiB limit')
+        out.seek(meta['security']); out.write(bytes(8))
+        out.seek(meta['optional'] + 64); out.write(bytes(4))
+        original_stream.seek(meta['table']); table = bytearray(original_stream.read(44))
+        struct.pack_into('<I', table, 16, final_size)
+        struct.pack_into('<I', table, 20, engine_offset)
+        struct.pack_into('<I', table, 32, header_offset)
+        struct.pack_into('<I', table, 40, zlib.crc32(table[:40]))
+        out.seek(meta['table']); out.write(table)
+    result = inspect(target)
+    require(result['raw'] == raw and result['locations'] == locations, 'Rebuilt container metadata differs')
+    engine_hash = digest(source, meta['engine'], meta['engine_end'] - meta['engine'])
+    require(digest(target, result['engine'], result['engine_end'] - result['engine']) == engine_hash,
+            'Rebuilding changed the setup engine')
+    require(digest(source) == before, 'Original installer changed during rebuilding')
+    return {'source': source.name, 'output': target.name, 'source_sha256': before,
+            'output_sha256': digest(target), 'output_bytes': target.stat().st_size,
+            'architectures_allowed_before': meta['allowed'], 'architectures_allowed_after': allowed,
+            'mode64_before': meta['mode64'], 'mode64_after': mode64,
+            'metadata_changed_bytes': sum(a != b for a, b in zip(meta['raw'], raw)),
+            'component_path_redirected': False, 'component_dispatch': 'embedded temporary extraction',
+            'payload_unchanged': False, 'application_payloads_unchanged': True,
+            'setup_engine_unchanged': True, 'setup_engine_sha256': engine_hash,
+            'signature_removed': True, 'embedded_files': embedded, 'runtime_tested': False}
 
 
 def patch(source, target, is_main=False):

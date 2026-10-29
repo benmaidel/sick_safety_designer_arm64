@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create experimental ARM64-admitting copies of supported SICK installers."""
+"""Create one standalone patched_arm64 EXE from a supported SICK installer."""
 import argparse
 import json
 import os
@@ -14,10 +14,10 @@ import tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
-from inno_arm64 import MAGIC, PatchError, digest, dispatcher, inspect, patch, require
+from inno_arm64 import MAGIC, PatchError, digest, dispatcher, inspect, patch, repack_main, require
 
 HERE = Path(__file__).resolve().parent
-TOOL_VERSION = '1.0.0'
+TOOL_VERSION = '2.0.0'
 
 
 def resolve_input(value):
@@ -33,7 +33,8 @@ def resolve_input(value):
     path = path.resolve()
     if path.is_dir():
         candidates = [p for p in path.iterdir() if p.is_file()
-                      and re.fullmatch(r'SafetyDesigner.*_Setup\.exe', p.name, re.I)]
+                      and re.fullmatch(r'SafetyDesigner.*_Setup\.exe', p.name, re.I)
+                      and not p.name.lower().startswith('patched_arm64')]
         require(len(candidates) == 1,
                 'Expected one SafetyDesigner*_Setup.exe in this folder; pass the exact EXE if ambiguous')
         path = candidates[0]
@@ -132,88 +133,65 @@ def inspect_nested(path, virtual_path):
     return row
 
 
-def write_windows_launcher(folder):
-    # An inline PowerShell command avoids changing PowerShell execution policy.
-    command = (
-        "$ErrorActionPreference='Stop'; try { $root=$env:SD_ARM64_ROOT; "
-        "$native=$env:PROCESSOR_ARCHITEW6432; if(-not $native){$native=$env:PROCESSOR_ARCHITECTURE}; "
-        "if($native -ne 'ARM64'){throw 'This experimental launcher requires Windows ARM64.'}; "
-        "$key=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,"
-        "[Microsoft.Win32.RegistryView]::Registry64).OpenSubKey('SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full'); "
-        "if(-not $key -or [int]$key.GetValue('Release',0) -lt 533320){throw 'Install or enable .NET Framework 4.8.1 before testing.'}; "
-        "$manifest=Get-Content -LiteralPath (Join-Path $root 'patch-manifest.json') -Raw | ConvertFrom-Json; "
-        "Write-Host 'Checking installer hashes...'; foreach($item in $manifest.files){ "
-        "if((Get-FileHash -LiteralPath (Join-Path $root $item.output) -Algorithm SHA256).Hash -ne $item.output_sha256)"
-        "{throw ('Missing or changed installer: '+$item.output)} }; "
-        "$logs=Join-Path $env:TEMP ('SafetyDesigner-ARM64-'+(Get-Date -Format 'yyyyMMdd-HHmmss')); "
-        "New-Item -ItemType Directory -Path $logs | Out-Null; Write-Host ('Logs: '+$logs); "
-        "$log='/LOG='+[char]34+(Join-Path $logs 'Setup.log')+[char]34; "
-        "$p=Start-Process -FilePath (Join-Path $root $manifest.main_output) "
-        "-ArgumentList @('/NOCODEMETER','/NORESTART',$log) -Wait -PassThru; "
-        "Write-Host ('Installer exit code: '+$p.ExitCode); exit $p.ExitCode "
-        "} catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 1 }"
-    )
-    text = ('@echo off\nsetlocal\nset "SD_ARM64_ROOT=%~dp0"\n'
-            'echo Experimental ARM64 installer: use a disposable VM snapshot with machinery disconnected.\n'
-            'echo This opens the vendor UI. Select components in that UI. USB driver steps can fail.\n'
-            'powershell.exe -NoProfile -Command "' + command + '"\n'
-            'set "SD_RESULT=%ERRORLEVEL%"\npause\nexit /b %SD_RESULT%\n')
-    (folder / 'Start-ARM64-Test.cmd').write_bytes(text.replace('\n', '\r\n').encode('ascii'))
+def debug_directory(destination):
+    return destination.with_name(destination.stem + '_debug')
+
+
+def retain_debug(stage, destination, status, error=None):
+    """Retain diagnostics only when requested, never temporary installer copies."""
+    require(not destination.exists(), 'Debug folder already exists: ' + str(destination))
+    prepared = stage / '_debug'
+    prepared.mkdir()
+    if (stage / 'logs').exists():
+        (stage / 'logs').rename(prepared / 'logs')
+    for file in stage.iterdir():
+        if file.is_file() and file.suffix.lower() != '.exe':
+            shutil.copy2(file, prepared / file.name)
+    (prepared / 'status.json').write_text(json.dumps({'status': status, 'error': error}, indent=2) + '\n')
+    prepared.rename(destination)
 
 
 def write_report(folder, manifest, nested, prerequisites):
-    title = manifest['product']
-    lines = [f'# {title}: experimental ARM64 installer copies', '',
-             'Created by Safety Designer ARM64 Patcher ' + TOOL_VERSION + '.', '',
-             f"Source SHA-256: `{manifest['source_sha256']}`", '',
-             f"Patched/verified {len(manifest['component_order'])} SICK component installers and the main launcher.", '',
-             'The original files were opened for reading only; their hashes were checked again after processing. '
-             'Modified copies are unsigned. Application payloads and embedded setup-engine content are unchanged.', '',
-             'The main dispatcher now uses the adjacent patched component copies. Keep this entire folder together. '
-             'Nested BUST helpers, Microsoft prerequisites, CodeMeter, drivers, licensing and application safety checks '
-             'were not patched.', '', '## Changes', '',
-             '| File | Allowed mask | 64-bit mode mask | Metadata bytes changed |',
-             '|---|---|---|---|']
+    lines = [f"# {manifest['product']}: standalone ARM64 installer", '',
+             f"Output: `{manifest['main_output']}`", '',
+             'The patched component installers are embedded inside this single EXE. The vendor launcher '
+             'extracts and executes them from its temporary directory; no adjacent component files are required.', '',
+             'The outer payload was rebuilt as Inno stored chunks, with updated offsets, sizes and file checksums. '
+             'The original setup engine is unchanged. Child application archives, prerequisites, drivers, licensing '
+             'and application safety checks were not modified. Modified installer copies are unsigned.', '',
+             f"Verified {len(manifest['component_order'])} patched component installers and the rebuilt main archive. "
+             f'Inspected {len(nested)} deeper executable/driver payload instances. The final EXE was extracted again '
+             'and every embedded file was checked against the intended SHA-256. These are static checks; '
+             'Windows runtime compatibility remains untested for this build.', '',
+             '## Changes', '', '| Installer | Allowed mask | 64-bit mode mask |', '|---|---|---|']
     for row in manifest['files']:
         lines.append(f"| {row['output']} | {row['architectures_allowed_before']:#04x} → "
-                     f"{row['architectures_allowed_after']:#04x} | {row['mode64_before']:#04x} → "
-                     f"{row['mode64_after']:#04x} | {row['metadata_changed_bytes']} |")
-    lines.extend(['', '## Validation and limits', '',
-                  'All output installers passed innoextract archive-integrity testing. Loader checksums, metadata '
-                  'chunk checksums, the decoded setup-engine CRC, architecture masks, original-file hashes and '
-                  'unchanged compressed payload/engine bytes were checked. These are static checks: this generated '
-                  'bundle has not been installed or runtime-tested by the patcher.', '',
-                  f'Inspected {len(nested)} extracted executable/driver/MSI payload instances inside components. '
-                  'Recognized deeper Inno helpers were checked for ARM64 gates; an unsupported or restricted deeper '
-                  'Inno installer would have stopped this build. Other executable/MSI custom actions may still have '
-                  'checks that this tool cannot infer. See nested-inventory.json.', '',
-                  'Windows ARM64 cannot run x86/x64 kernel drivers through application emulation. Do not rename '
-                  'driver architecture labels or disable driver signature enforcement. A zero parent installer exit '
-                  'code can hide a failed driver helper. In the separate 2025.03 VM test, six USB-helper runs failed '
-                  'even though all component installers returned zero. That observation does not establish the '
-                  'behavior of another release.', '',
-                  'The previously tested vendor wrapper returned success in a silent run without installing its '
-                  'custom-selected components. Use the normal UI through Start-ARM64-Test.cmd and verify actual '
-                  'component installation; do not equate wrapper exit code zero with a complete installation.', '',
-                  '## Windows test instructions', '',
-                  '1. Take a disposable Windows 11 ARM VM snapshot; keep machinery disconnected.',
-                  '2. Copy this entire folder to a local Windows disk.',
-                  '3. Run Start-ARM64-Test.cmd. It requires .NET Framework 4.8.1, verifies the copied hashes, '
-                  'opens the vendor selection UI, skips optional CodeMeter installation, and disables automatic restart.',
-                  '4. Record component and driver errors. Restart Windows normally if required.',
-                  '5. Test offline startup separately. Device communication, simulation, licensing-dependent features '
-                  'and safety verification require their own assessment. Honor the application requirements/warnings.',
-                  '6. Revert the VM snapshot if needed. The patcher never installs anything in Windows.', '',
-                  'The main archive retains its original embedded prerequisite payloads. Unmodified prerequisites found:', ''])
+                     f"{row['architectures_allowed_after']:#04x} | {row['mode64_before']:#04x} → {row['mode64_after']:#04x} |")
+    lines.extend(['', '## Windows test', '',
+                  'Take a disposable Windows 11 ARM VM snapshot and keep machinery disconnected. Copy only the '
+                  'patched EXE to a local Windows disk, ensure .NET Framework 4.8.1 is available, and run the normal '
+                  'vendor UI. Select the components there. Use /NOCODEMETER if the optional bundled runtime should '
+                  'be skipped and /NORESTART to prevent automatic restart. Existing licensing requirements remain.', '',
+                  'An unattended wrapper exit code of zero can mean only the release wrapper was installed. '
+                  'Check component installation and helper logs. Driver helpers can fail while a parent installer '
+                  'returns success. x86/x64 kernel drivers do not become ARM64 drivers through emulation. No '
+                  'driver signature enforcement is disabled by this tool.', '',
+                  'Device communication, simulation, safety verification and commissioning are unproven. Honor '
+                  'SICK system requirements and application warnings. The original installer is preserved.', '',
+                  '## Unmodified prerequisites', ''])
     lines.extend('- ' + row['name'] for row in prerequisites)
-    lines.extend(['', 'The complete source/output hashes and validation results are in patch-manifest.json. '
-                  'No claim of SICK support or safety-related suitability is made by this installer experiment.', ''])
+    lines.extend(['', 'See patch-manifest.json, nested-inventory.json, and logs/ for the detailed diagnostics. '
+                  'This folder exists because --debug was requested.', ''])
     (folder / 'ARM64-Patch-Report.md').write_text('\n'.join(lines), encoding='utf-8')
 
 
-def build(source, destination, extractor):
+def build(source, destination, extractor, debug=False):
     source, destination = source.resolve(), destination.resolve()
-    require(not destination.exists(), 'Output already exists; choose a new folder: ' + str(destination))
+    require(not destination.exists(), 'Output already exists; choose a new installer filename: ' + str(destination))
+    require(destination.suffix.lower() == '.exe', '--output must name an EXE file, not a folder')
+    debug_path = debug_directory(destination)
+    if debug:
+        require(not debug_path.exists(), 'Debug folder already exists: ' + str(debug_path))
     require(destination != source and source not in destination.parents,
             'Output cannot replace or be inside the source executable')
     meta = inspect(source)
@@ -229,6 +207,8 @@ def build(source, destination, extractor):
     try:
         work, logs = stage / '_work', stage / 'logs'
         work.mkdir(); logs.mkdir()
+        parts = work / 'patched-components'
+        parts.mkdir()
         print('Inspecting and extracting the main archive...', flush=True)
         main_paths = extractor.listing(source, logs / 'main-list.log')
         extractor.extract(source, work / 'main', logs / 'main-extract.log')
@@ -260,19 +240,31 @@ def build(source, destination, extractor):
                 for helper in sorted(helper_dir.rglob('*')):
                     if helper.is_file():
                         nested.append(inspect_nested(helper, name + '/' + helper.relative_to(helper_dir).as_posix()))
-            row = patch(component, stage / name)
-            extractor.test(stage / name, logs / (name + '.integrity.log'))
+            row = patch(component, parts / name)
+            extractor.test(parts / name, logs / (name + '.integrity.log'))
             row['archive_integrity'] = 'passed'
             rows.append(row)
-        main_name = source.stem + '_ARM64_Experimental.exe'
-        print('Patching and verifying the main launcher...', flush=True)
-        row = patch(source, stage / main_name, is_main=True)
+        main_name = destination.name
+        print('Embedding patched components into the standalone installer...', flush=True)
+        row = repack_main(source, stage / main_name, files,
+                          {name: parts / name for name in names})
         extractor.test(stage / main_name, logs / 'main-integrity.log')
-        row['archive_integrity'] = 'passed'; rows.append(row)
+        row['archive_integrity'] = 'passed'
+        print('Extracting the finished installer to verify all embedded payloads...', flush=True)
+        verified = work / 'roundtrip'
+        extractor.extract(stage / main_name, verified, logs / 'main-roundtrip.log')
+        actual_files = [p for p in verified.rglob('*') if p.is_file()]
+        require(len(actual_files) == len(row['embedded_files']), 'Rebuilt embedded-file count differs')
+        for item in row['embedded_files']:
+            matches = [p for p in actual_files if p.name == item['name']]
+            require(len(matches) == 1 and digest(matches[0]) == item['sha256'],
+                    'Embedded payload round-trip mismatch: ' + item['name'])
+        row['embedded_roundtrip'] = 'passed'
+        rows.append(row)
         prerequisites = [{'name': p.name, 'sha256': digest(p), 'modified': False} for p in files
                          if p not in components.values()]
         require(digest(source) == source_hash, 'Source main installer changed during the build')
-        manifest = {'schema': 1, 'tool_version': TOOL_VERSION,
+        manifest = {'schema': 2, 'tool_version': TOOL_VERSION,
                     'created': datetime.now().astimezone().isoformat(),
                     'product': meta['values']['app_name'], 'source_name': source.name,
                     'source_sha256': source_hash, 'original_preserved': True,
@@ -292,29 +284,33 @@ def build(source, destination, extractor):
                                      'original_preserved': True})
         manifest['license_files'] = license_rows
         (stage / 'patch-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
-        write_windows_launcher(stage)
         write_report(stage, manifest, nested, prerequisites)
-        shutil.rmtree(work)
-        require(not destination.exists(), 'Output folder appeared during the build; refusing to replace it')
-        stage.rename(destination)
+        require(not destination.exists(), 'Output appeared during the build; refusing to replace it')
+        if debug:
+            retain_debug(stage, debug_path, 'validated')
+        (stage / main_name).rename(destination)
         print('\nReady: ' + str(destination), flush=True)
+        if debug:
+            print('Debug information: ' + str(debug_path), flush=True)
         print('Originals preserved. Static checks passed. Windows runtime compatibility is not established.', flush=True)
         return manifest
-    except BaseException:
-        # Only the uniquely named staging directory created above can be removed.
-        failure = destination.parent / (destination.name + '-FAILED-' + datetime.now().strftime('%Y%m%d-%H%M%S'))
-        if stage.exists() and not failure.exists():
-            # Preserve diagnostics, not a misleading incomplete installable bundle.
-            if (stage / 'logs').exists():
-                (stage / 'logs').rename(failure)
-            shutil.rmtree(stage)
+    except BaseException as error:
+        if debug and not debug_path.exists():
+            try:
+                retain_debug(stage, debug_path, 'failed', str(error))
+                print('Debug information: ' + str(debug_path), file=sys.stderr)
+            except (OSError, PatchError) as debug_error:
+                print('Could not save debug information: ' + str(debug_error), file=sys.stderr)
         raise
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('installer', nargs='?', help='Main setup EXE or its download folder')
-    parser.add_argument('-o', '--output', type=Path, help='New output folder; never overwritten')
+    parser.add_argument('-o', '--output', type=Path, help='New output EXE path; defaults to patched_arm64_<original name> beside the input')
+    parser.add_argument('--debug', action='store_true', help='Keep logs and reports in a sibling <output stem>_debug folder')
     parser.add_argument('--extractor', help='Optional custom innoextract executable')
     parser.add_argument('--inspect', action='store_true', help='Inspect the main layout only; create no output')
     parser.add_argument('--version', action='version', version=TOOL_VERSION)
@@ -332,14 +328,17 @@ def main(argv=None):
             print(json.dumps({'product': meta['values']['app_name'], 'format': meta['format'],
                               'architectures_allowed': meta['allowed'], 'mode64': meta['mode64'],
                               'component_count': len(names), 'components': names,
-                              'dispatcher_requires_redirect': redirect}, indent=2))
+                              'component_dispatch': 'embedded temporary extraction',
+                              'restore_embedded_dispatch': not redirect}, indent=2))
             return 0
-        output = args.output or source.parent / (source.stem + '_ARM64_Experimental')
-        build(source, output, Extractor(args.extractor))
+        output = args.output or source.with_name('patched_arm64_' + source.name)
+        build(source, output, Extractor(args.extractor), debug=args.debug)
         return 0
     except (PatchError, OSError, ValueError, EOFError) as error:
         print('\nSTOPPED: ' + str(error), file=sys.stderr)
-        print('The original installer has not been modified. No completed bundle was published.', file=sys.stderr)
+        print('The original installer has not been modified. No new installer was published.', file=sys.stderr)
+        if not args.debug:
+            print('Rerun with --debug to retain diagnostic logs.', file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         print('\nCancelled. Originals are unchanged.', file=sys.stderr)

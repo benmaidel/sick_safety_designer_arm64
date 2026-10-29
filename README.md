@@ -1,17 +1,21 @@
 # Safety Designer ARM64 Patcher
 
-Reusable scripts for creating experimental Windows ARM64 installer copies from supported SICK Safety Designer release packages. It handles the main launcher and discovers its SICK component installers automatically. It never installs software in Windows and never edits the downloaded originals.
+Create a standalone experimental ARM64 installer from a supported SICK Safety Designer download. The patcher preserves the original installer, patches the architecture settings in the main launcher and its SICK components, and embeds those patched components back into one EXE.
 
-## Run it on your Mac
+## Run on your Mac
 
-1. Keep the `scripts/` folder intact and double-click **scripts/Patch Safety Designer.command**.
-2. Drag the downloaded Safety Designer folder, or its main setup EXE, into the Terminal prompt and press Return.
+Double-click **scripts/Patch Safety Designer.command**, drag the downloaded folder or main EXE into the Terminal prompt, and press Return.
 
-The tool creates a new folder beside the source installer, named `<installer name>_ARM64_Experimental`. It stops if that folder already exists; move the previous result or choose another output name. It prints the final location when every check has passed.
+By default, the only permanent output is a new installer beside the original:
 
-This package includes the unpacker and its libraries for **Apple Silicon Macs running macOS 26 or later**. It requires **Python 3.9 or later with the standard lzma module**; Python is already available on the Mac used to build and test this package. No network access, Homebrew installation, administrator privileges or Parallels access is required by the patching tool.
+```text
+SafetyDesigner_V2026.01_Setup.exe
+patched_arm64_SafetyDesigner_V2026.01_Setup.exe
+```
 
-The Windows test launcher in a generated bundle is a separate file. Run that inside a disposable Windows VM snapshot, with the whole generated folder copied to a local Windows disk.
+No output bundle, debug folder, component sidecars, report or log is retained by default. Temporary extraction/build folders are removed when the process finishes, including on failure or cancellation. Existing files are never overwritten.
+
+Keep the repository's `scripts/` folder intact. The included unpacker/libraries require **Apple Silicon and macOS 26 or later**. The Python code requires **Python 3.9+ with lzma**. The patching tool needs no network access, Homebrew installation, administrator privileges or Parallels connection. It does not install anything in Windows.
 
 ## Command-line usage
 
@@ -21,75 +25,83 @@ From the repository root:
 python3 scripts/patch_safety_designer.py "/path/to/SafetyDesigner_V2026.01_Setup.exe"
 ```
 
-Choose a different new output folder:
+A download folder containing one original `SafetyDesigner*_Setup.exe` also works. Already generated `patched_arm64_…` files are excluded from folder discovery.
+
+Choose another output **EXE filename**, rather than an output directory:
 
 ```sh
-python3 scripts/patch_safety_designer.py "/path/to/download/folder" --output "/path/to/new/ARM64-bundle"
+python3 scripts/patch_safety_designer.py "/path/to/setup.exe" --output "/path/to/patched_arm64_custom.exe"
 ```
 
-Inspect the main package without extracting or creating an output folder:
+Inspect the main package without extracting or writing output:
 
 ```sh
 python3 scripts/patch_safety_designer.py "/path/to/setup.exe" --inspect
 ```
 
-On another platform, supply a suitable installed unpacker with `--extractor /path/to/innoextract`. The bundled native unpacker is for macOS Apple Silicon only; the Python source uses the standard library. Cross-platform operation has not been validated here.
+On another platform, install a suitable `innoextract` or pass `--extractor /path/to/innoextract`. The bundled native binaries are for Apple Silicon macOS only. Other platforms have not been validated.
 
-## What it changes
+## Optional debug output
 
-For supported x64-capable SICK Inno installers, the tool adds ARM64 to the allowed architecture mask and to 64-bit installation mode where x64 mode was enabled. It preserves the other architecture bits. It changes the main launcher's `INSTALLSETUPCOMPONENT` function to load the adjacent patched component installers instead of its embedded originals.
+Add `--debug` to retain diagnostic information:
 
-It rebuilds metadata checksums and updates loader offsets. Modified copies lose their original Authenticode signatures and are unsigned. Compressed application payloads and the embedded setup engine remain byte-identical to the originals. The tool verifies those facts before publishing the bundle.
+```sh
+python3 scripts/patch_safety_designer.py "/path/to/SafetyDesigner_V2026.01_Setup.exe" --debug
+```
 
-The main archive still contains its original embedded prerequisite files, but the patched component dispatcher executes the adjacent component copies. Keep the output folder together. The tool copies SICK's accompanying licence file into the bundle.
+This produces the same standalone EXE plus a sibling folder:
 
-## Future-release support and refusal rules
+```text
+patched_arm64_SafetyDesigner_V2026.01_Setup.exe
+patched_arm64_SafetyDesigner_V2026.01_Setup_debug/
+```
 
-The supported on-disk format is **Inno Setup data 6.0.0 Unicode**, with its observed loader/header layout, **IFPS script format 23**, and SICK's named `INITCOMPONENTS` and `INSTALLSETUPCOMPONENT` functions. This includes the supplied 2025.03 and 2026.01 main installers. A compiler's displayed version can differ from its on-disk data-format identifier.
+The debug folder contains `patch-manifest.json`, `nested-inventory.json`, `ARM64-Patch-Report.md`, `status.json`, unpacker/integrity logs, and a copy of the accompanying SICK licence file when present. It contains no temporary installers or component sidecars and is not needed to run the patched EXE. Diagnostic logs are also retained there when a build fails after staging starts. Existing debug folders are not overwritten. `--inspect` stays read-only even with `--debug`.
 
-There is no fixed release number, original installer hash or component-count restriction in the tool. It reads the component list from the script, matches it against the extracted files, and finds the dispatch constant within the actual named function body.
+For the interactive Mac prompt with debugging enabled:
 
-It deliberately stops on unfamiliar format/layout versions, damaged checksums, changed dispatch expressions, missing/extra components, unsafe archive paths, a non-x64-capable component, or a deeper nested Inno installer that still excludes ARM64 or needs a 64-bit-mode patch. It cannot promise automatic compatibility with every future SICK release. If a future release stops, preserve the message and the `*-FAILED-*` diagnostic-log folder for review. Do not disable the checks or change version labels to force it through.
+```sh
+zsh "scripts/Patch Safety Designer.command" --debug
+```
 
-Existing output files are never overwritten. Successful bundles are published only after validation completes. Failed builds remove their temporary executable copies and retain diagnostic logs when available. A large build needs roughly four times the source installer's size plus 512 MiB of free disk space. Memory use is bounded; large EXEs are copied and hashed in chunks.
+## What changes
 
-## What it does not fix
+The tool adds ARM64 to allowed architecture masks and to 64-bit installation mode where x64 mode was enabled. Other architecture bits are preserved. Patched SICK component EXEs are embedded inside the rebuilt main Inno container, where the original vendor flow extracts and launches them from its temporary directory. No external-file dispatch or additional Windows launcher is required.
 
-Drivers, driver catalogues, licensing, application safety checks, Microsoft prerequisites and CodeMeter are not relabelled or patched. The tool inspects deeper executable/driver payloads and recognized Inno helpers, but it cannot infer every possible check inside arbitrary EXEs or MSI custom actions.
+The outer container uses Inno stored chunks with updated file locations, sizes and checksums. Its compressed metadata and loader offsets/checksums are rebuilt. The resulting EXE can be larger than the download because its outer payload is stored without recompression; the application archives inside child installers remain unchanged. Setup-engine content is preserved byte for byte. Modified installer copies are unsigned because their original Authenticode signatures cannot authenticate changed content.
 
-Windows application emulation cannot make an x86/x64 kernel driver into an ARM64 driver. Do not disable driver-signature enforcement. The generated test launcher skips the optional CodeMeter installation using SICK's existing `/NOCODEMETER` option; it does not remove runtime licence requirements. It requires .NET Framework 4.8.1 and opens the vendor's interactive component-selection UI.
+Drivers, driver catalogues, application safety checks, licensing, Microsoft prerequisites and CodeMeter are not relabelled or patched. The original licence file remains beside the source; a copy is retained only in debug output.
 
-In the earlier, separate **2025.03 Windows ARM64 test**, all 29 component installers returned zero and the application reached a responsive start page. Six USB driver-helper runs nevertheless failed. The main wrapper also returned zero in an unattended invocation without installing its custom-selected components. Those results demonstrate why component logs and real application/device tests matter; they are not a compatibility guarantee for another release. The reusable tool performs static checks only.
+## Supported formats and future releases
 
-## Output and validation
+Support is limited to the observed **Inno Setup data 6.0.0 Unicode** layout, **IFPS script format 23**, SICK's `INITCOMPONENTS` / `INSTALLSETUPCOMPONENT` functions, and the 74-byte embedded-file location-record layout. This includes the supplied 2025.03 and 2026.01 main packages. A compiler's displayed version can differ from its data-format identifier.
 
-Each generated folder contains:
+There is no fixed release number, source installer hash or component count. The component list is discovered from the script and matched to extracted files. The tool stops on unfamiliar formats, changed dispatch expressions, damaged checksums, missing/extra payloads, unsafe archive paths, encrypted/spanned containers, unsupported offsets or deeper nested Inno installers requiring further architecture changes. It does not promise compatibility with every future release. Rerun with `--debug` to retain diagnostics; do not disable checks or change version labels to force an unsupported package through.
 
-- The modified main installer and all discovered SICK component installers.
-- `Start-ARM64-Test.cmd`, which verifies hashes and opens the vendor UI inside Windows.
-- `ARM64-Patch-Report.md`, explaining changes and limitations.
-- `patch-manifest.json`, with source/output hashes, masks, payload hashes and validation results.
-- `nested-inventory.json`, listing inspected helper and driver payloads.
-- `logs/`, with unpacker listings, extraction logs and full archive-integrity results.
+Allow roughly four times the source installer size plus 512 MiB of free space. Large EXEs are copied and hashed in chunks. The current rebuild requires stored-chunk start offsets below 2 GiB and a final file below 4 GiB; it stops if those limits would be exceeded.
 
-Validation includes metadata/loader CRCs, decoded setup-engine CRC, exact nested-extraction coverage, source immutability, narrowly limited metadata differences, unchanged compressed application/engine bytes, and independent archive-integrity checks using innoextract. Successful static validation is not proof of device communication, simulation, correct safety information, or suitability for commissioning or safety verification. Honor SICK's system requirements and application warnings.
+## Validation and Windows testing
 
-## Repository contents
+Before publishing the EXE, the tool checks metadata/loader CRCs, decoded setup-engine CRC, architecture settings, original-file hashes, unchanged child application archives and unchanged setup engines. Every patched component and the rebuilt outer archive undergo full innoextract integrity verification. The final EXE is then extracted again, and every embedded file is compared against its intended SHA-256. This confirms the patched components are actually embedded, rather than depending on adjacent files.
 
-- `scripts/patch_safety_designer.py`: command-line tool and build orchestration.
-- `scripts/inno_arm64.py`: bounded format readers, validation and metadata patching.
-- `scripts/Patch Safety Designer.command`: double-click Mac launcher.
+These are **static checks**, not proof of runtime compatibility. Take a disposable Windows 11 ARM VM snapshot, keep machinery disconnected, copy only the patched EXE to a local Windows disk, and test the normal vendor UI. Ensure .NET Framework 4.8.1 is available. SICK's existing `/NOCODEMETER` option can skip optional bundled CodeMeter installation; `/NORESTART` prevents automatic restart. Licence requirements remain in place.
+
+The earlier, separate 2025.03 VM test reached a responsive application start page after all 29 component installers returned zero. Six USB driver-helper runs nevertheless failed. An unattended wrapper also returned zero without selecting its custom components. Those observations apply to that earlier installation method; they do not establish runtime compatibility of a newly rebuilt installer. Check actual component installation and helper logs instead of relying only on a parent exit code.
+
+Windows application emulation does not convert x86/x64 kernel drivers into ARM64 drivers. Do not disable driver-signature enforcement. Device communication, simulation, correct safety information, commissioning and safety verification need separate assessment. Honor SICK's system requirements and application warnings.
+
+## Repository and tests
+
+- `scripts/patch_safety_designer.py`: CLI, orchestration, single-file publishing and optional diagnostics.
+- `scripts/inno_arm64.py`: bounded format readers, metadata patches and embedded-container rebuild.
+- `scripts/Patch Safety Designer.command`: double-click Mac entry point.
 - `scripts/tests/`: regression tests with generated fixtures; no SICK application binaries.
-- `scripts/vendor/`: the unmodified Mac unpacker, its libraries, hashes and licence notices.
+- `scripts/vendor/`: unmodified Mac unpacker/libraries, hashes and licence notices.
 
-Downloaded installers, generated bundles, logs and machine-specific test evidence are not part of this repository.
-
-## Tests and third-party components
-
-Run the included regression tests:
+Run the regression tests:
 
 ```sh
 python3 -m unittest discover -s scripts/tests -v
 ```
 
-The included unpacker is **innoextract 1.9**, by Daniel Scharrer. Its SHA-256 and the hashes of its bundled Boost, liblzma and zstd dependencies are checked before use. Dependencies come from the locally verified Homebrew bottles/libraries used during the earlier investigation. No system libraries are replaced. See [dependency hashes](scripts/vendor/dependencies.json), [licence notices](scripts/vendor/licenses/), and [third-party acknowledgements](scripts/THIRD-PARTY.md) for provenance, acknowledgements and licence notices.
+Downloaded installers, generated EXEs, diagnostics and machine-specific test evidence are excluded from the repository. The unpacker is **innoextract 1.9**, by Daniel Scharrer. Its hash and bundled dependency hashes are checked before execution. No system libraries are replaced. See [dependency hashes](scripts/vendor/dependencies.json), [licence notices](scripts/vendor/licenses/), and [third-party acknowledgements](scripts/THIRD-PARTY.md).
