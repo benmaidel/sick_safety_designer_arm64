@@ -239,12 +239,12 @@ class PatcherTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return main([str(source), *options])
 
-    def test_default_publishes_only_prefixed_single_exe(self):
+    def test_default_publishes_only_suffixed_single_exe(self):
         source = self.make_release()
         before = source.read_bytes()
         existing = set(self.root.iterdir())
         self.assertEqual(self.invoke_tool(source), 0)
-        output = source.with_name('patched_arm64_' + source.name)
+        output = source.with_name(source.stem + '_patched_arm64' + source.suffix)
         self.assertEqual(set(self.root.iterdir()) - existing, {output})
         self.assertTrue(output.is_file())
         self.assertEqual(source.read_bytes(), before)
@@ -262,7 +262,7 @@ class PatcherTests(unittest.TestCase):
         source = self.make_release()
         existing = set(self.root.iterdir())
         self.assertEqual(self.invoke_tool(source, '--debug'), 0)
-        output = source.with_name('patched_arm64_' + source.name)
+        output = source.with_name(source.stem + '_patched_arm64' + source.suffix)
         debug = debug_directory(output)
         self.assertEqual(set(self.root.iterdir()) - existing, {output, debug})
         self.assertTrue((debug / 'patch-manifest.json').is_file())
@@ -279,7 +279,7 @@ class PatcherTests(unittest.TestCase):
         source = self.make_release()
         existing = set(self.root.iterdir())
         self.assertEqual(self.invoke_tool(source, '--debug', fail=True), 2)
-        output = source.with_name('patched_arm64_' + source.name)
+        output = source.with_name(source.stem + '_patched_arm64' + source.suffix)
         debug = debug_directory(output)
         self.assertEqual(set(self.root.iterdir()) - existing, {debug})
         self.assertEqual(json.loads((debug / 'status.json').read_text())['status'], 'failed')
@@ -293,7 +293,7 @@ class PatcherTests(unittest.TestCase):
 
     def test_existing_default_output_is_never_replaced(self):
         source = self.make_release()
-        output = source.with_name('patched_arm64_' + source.name)
+        output = source.with_name(source.stem + '_patched_arm64' + source.suffix)
         output.write_bytes(b'EXISTING INSTALLER')
         existing = set(self.root.iterdir())
         self.assertEqual(self.invoke_tool(source), 2)
@@ -302,7 +302,7 @@ class PatcherTests(unittest.TestCase):
 
     def test_existing_debug_folder_is_never_replaced(self):
         source = self.make_release()
-        output = source.with_name('patched_arm64_' + source.name)
+        output = source.with_name(source.stem + '_patched_arm64' + source.suffix)
         debug = debug_directory(output)
         debug.mkdir(); (debug / 'keep.txt').write_text('EXISTING DEBUG LOG')
         existing = set(self.root.iterdir())

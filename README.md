@@ -10,7 +10,7 @@ By default, the only permanent output is a new installer beside the original:
 
 ```text
 SafetyDesigner_V2026.01_Setup.exe
-patched_arm64_SafetyDesigner_V2026.01_Setup.exe
+SafetyDesigner_V2026.01_Setup_patched_arm64.exe
 ```
 
 No output bundle, debug folder, component sidecars, report or log is retained by default. Temporary extraction/build folders are removed when the process finishes, including on failure or cancellation. Existing files are never overwritten.
@@ -25,12 +25,12 @@ From the repository root:
 python3 scripts/patch_safety_designer.py "/path/to/SafetyDesigner_V2026.01_Setup.exe"
 ```
 
-A download folder containing one original `SafetyDesigner*_Setup.exe` also works. Already generated `patched_arm64_…` files are excluded from folder discovery.
+A download folder containing one original `SafetyDesigner*_Setup.exe` also works. Generated `…_patched_arm64.exe` files are excluded from folder discovery.
 
 Choose another output **EXE filename**, rather than an output directory:
 
 ```sh
-python3 scripts/patch_safety_designer.py "/path/to/setup.exe" --output "/path/to/patched_arm64_custom.exe"
+python3 scripts/patch_safety_designer.py "/path/to/setup.exe" --output "/path/to/custom_patched_arm64.exe"
 ```
 
 Inspect the main package without extracting or writing output:
@@ -52,8 +52,8 @@ python3 scripts/patch_safety_designer.py "/path/to/SafetyDesigner_V2026.01_Setup
 This produces the same standalone EXE plus a sibling folder:
 
 ```text
-patched_arm64_SafetyDesigner_V2026.01_Setup.exe
-patched_arm64_SafetyDesigner_V2026.01_Setup_debug/
+SafetyDesigner_V2026.01_Setup_patched_arm64.exe
+SafetyDesigner_V2026.01_Setup_patched_arm64_debug/
 ```
 
 The debug folder contains `patch-manifest.json`, `nested-inventory.json`, `ARM64-Patch-Report.md`, `status.json`, unpacker/integrity logs, and a copy of the accompanying SICK licence file when present. It contains no temporary installers or component sidecars and is not needed to run the patched EXE. Diagnostic logs are also retained there when a build fails after staging starts. Existing debug folders are not overwritten. `--inspect` stays read-only even with `--debug`.

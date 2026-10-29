@@ -34,7 +34,8 @@ def resolve_input(value):
     if path.is_dir():
         candidates = [p for p in path.iterdir() if p.is_file()
                       and re.fullmatch(r'SafetyDesigner.*_Setup\.exe', p.name, re.I)
-                      and not p.name.lower().startswith('patched_arm64')]
+                      and not p.name.lower().startswith('patched_arm64_')
+                      and not p.stem.lower().endswith('_patched_arm64')]
         require(len(candidates) == 1,
                 'Expected one SafetyDesigner*_Setup.exe in this folder; pass the exact EXE if ambiguous')
         path = candidates[0]
@@ -309,7 +310,7 @@ def build(source, destination, extractor, debug=False):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('installer', nargs='?', help='Main setup EXE or its download folder')
-    parser.add_argument('-o', '--output', type=Path, help='New output EXE path; defaults to patched_arm64_<original name> beside the input')
+    parser.add_argument('-o', '--output', type=Path, help='New output EXE path; defaults to <original stem>_patched_arm64.exe beside the input')
     parser.add_argument('--debug', action='store_true', help='Keep logs and reports in a sibling <output stem>_debug folder')
     parser.add_argument('--extractor', help='Optional custom innoextract executable')
     parser.add_argument('--inspect', action='store_true', help='Inspect the main layout only; create no output')
@@ -331,7 +332,7 @@ def main(argv=None):
                               'component_dispatch': 'embedded temporary extraction',
                               'restore_embedded_dispatch': not redirect}, indent=2))
             return 0
-        output = args.output or source.with_name('patched_arm64_' + source.name)
+        output = args.output or source.with_name(source.stem + '_patched_arm64' + source.suffix)
         build(source, output, Extractor(args.extractor), debug=args.debug)
         return 0
     except (PatchError, OSError, ValueError, EOFError) as error:
